@@ -71,40 +71,75 @@ export default Plugin.define({
       const current = context.ui.router.current()
       let sessionID = current?.type === "session" ? current.sessionID : undefined
       mkdirSync(CACHE, { recursive: true })
-      const tmp = join(CACHE, `upload-${Date.now()}`)
-      const code = await runPicker(tmp)
-      if (code === -1 && !existsSync(tmp)) {
-        context.ui.toast.show({
-          message: "Uploads need termux-api — run: pkg install termux-api",
-          variant: "error",
-          duration: 10000,
-        })
-        return
+      const collected: { file: string; name: string }[] = []
+      const cleanupAll = () => {
+        for (const f of collected) rmSync(f.file, { force: true })
       }
-      // termux-storage-get exits before the picker finishes copying the file (exit code
-      // says nothing about a pick), so wait for the file to appear and settle. A cancelled
-      // pick ends silently; the attempt just stays open until the next + supersedes it.
-      const got = await waitForStableFile(tmp, () => attempt !== attemptSeq)
-      if (attempt !== attemptSeq) {
-        if (existsSync(tmp)) rmSync(tmp)
-        return
-      }
-      if (!got || !existsSync(tmp)) {
-        context.ui.toast.show({ message: "Upload failed: file did not arrive", variant: "error" })
-        return
-      }
-      const file = tmp + extFor(readFileSync(tmp))
-      renameSync(tmp, file)
-      const name = basename(file)
-      sending = true
       try {
+        // Pick files until "Send now"; a cancelled pick after at least one file keeps it.
+        for (;;) {
+          const tmp = join(CACHE, `upload-${Date.now()}-${collected.length}`)
+          const code = await runPicker(tmp)
+          if (attempt !== attemptSeq) {
+            cleanupAll()
+            return
+          }
+          if (code === -1 && !existsSync(tmp)) {
+            cleanupAll()
+            context.ui.toast.show({
+              message: "Uploads need termux-api — run: pkg install termux-api",
+              variant: "error",
+              duration: 10000,
+            })
+            return
+          }
+          // termux-storage-get returns when the picker closes; the copy can land later, so
+          // wait for the file to appear and settle. A cancelled pick leaves nothing at all:
+          // after a short grace, treat that as a cancel and keep whatever was picked before.
+          const exitedAt = Date.now()
+          const got = await waitForStableFile(
+            tmp,
+            () => attempt !== attemptSeq || (Date.now() - exitedAt > 15000 && !existsSync(tmp)),
+          )
+          if (attempt !== attemptSeq) {
+            if (existsSync(tmp)) rmSync(tmp)
+            cleanupAll()
+            return
+          }
+          if (!got || !existsSync(tmp)) {
+            if (collected.length) break
+            context.ui.toast.show({ message: "Upload failed: file did not arrive", variant: "error" })
+            return
+          }
+          const file = tmp + extFor(readFileSync(tmp))
+          renameSync(tmp, file)
+          collected.push({ file, name: basename(file) })
+          sending = true // taps while a dialog is open are ignored
+          const count = collected.length
+          const choice = await context.ui.dialog.select({
+            title: `${count} file${count > 1 ? "s" : ""} ready`,
+            options: [
+              { title: "Send now", value: "send" },
+              { title: "Add another file", value: "more" },
+            ],
+          })
+          if (choice === undefined) {
+            cleanupAll()
+            context.ui.toast.show({ message: "Upload cancelled", variant: "info" })
+            return
+          }
+          if (choice === "send") break
+          sending = false // back to picker-wait: a new + tap supersedes
+        }
+        sending = true
+        const count = collected.length
         const text = await context.ui.dialog.prompt({
-          title: "Send to chat",
-          message: `${name} is attached — type a message, then press Enter`,
+          title: `Send ${count} file${count > 1 ? "s" : ""} to chat`,
+          message: `${collected.map((f) => f.name).join(", ")} attached — type a message, then press Enter`,
           placeholder: "Type your message…",
         })
         if (text === null || text === undefined) {
-          rmSync(file)
+          cleanupAll()
           context.ui.toast.show({ message: "Upload cancelled", variant: "info" })
           return
         }
@@ -129,7 +164,11 @@ export default Plugin.define({
           }
         }
         try {
-          await context.client.session.prompt({ sessionID, text, files: [{ uri: "file://" + file, name }] })
+          await context.client.session.prompt({
+            sessionID,
+            text,
+            files: collected.map((f) => ({ uri: "file://" + f.file, name: f.name })),
+          })
         } catch (e) {
           context.ui.toast.show({
             message: `Upload failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -137,7 +176,10 @@ export default Plugin.define({
           })
           return
         }
-        context.ui.toast.show({ message: `Sent ${name}`, variant: "success" })
+        context.ui.toast.show({
+          message: `Sent ${count} file${count > 1 ? "s" : ""}`,
+          variant: "success",
+        })
       } finally {
         sending = false
       }
