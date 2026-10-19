@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui"
 import { spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs"
