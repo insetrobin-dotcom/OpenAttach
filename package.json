@@ -2,5 +2,6 @@
   "name": "openattach",
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./index.ts", "./tui": "./tui.tsx" }
+  "exports": { ".": "./index.ts", "./tui": "./tui.tsx" },
+  "dependencies": { "@opencode/plugin": "latest" }
 }
